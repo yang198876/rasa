@@ -158,7 +158,7 @@ jobs:
         make prepare-tests-windows
 
     - name: Test Code 🔍
-      run: JOBS=2 make test
+      run: make test
 
     - name: Send Coverage Report 📊
       if: matrix.python-version == 3.6
