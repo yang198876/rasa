@@ -1,5 +1,5 @@
 from yarl import URL
-from typing import Text
+from typing import List, Text
 
 import rasa.utils.io as io_utils
 
@@ -15,6 +15,10 @@ def latest_request(mocked, request_type, path):
 
 def json_of_latest_request(r):
     return r[-1].kwargs["json"]
+
+
+def platform_independent_paths(coll: List[Text]):
+    return [i.replace("\\", "/") for i in coll]
 
 
 def update_number_of_epochs(config_path: Text, output_file: Text):

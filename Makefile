@@ -18,10 +18,15 @@ help:
 	@echo "        Install system requirements for running tests on Ubuntu and Debian based systems."
 	@echo "    prepare-tests-macos"
 	@echo "        Install system requirements for running tests on macOS."
+	@echo "    prepare-tests-windows"
+	@echo "        Install system requirements for running tests on Windows."
 	@echo "    prepare-tests-files"
 	@echo "        Download all additional project files needed to run tests."
 	@echo "    test"
 	@echo "        Run pytest on tests/."
+	@echo "        Use the JOBS environment variable to configure number of workers (default: 1)."
+	@echo "    test-windows"
+	@echo "        Run pytest on tests/ on Windows."
 	@echo "        Use the JOBS environment variable to configure number of workers (default: 1)."
 	@echo "    doctest"
 	@echo "        Run all doctests embedded in the documentation."
@@ -85,6 +90,10 @@ prepare-tests-windows: prepare-wget-windows prepare-tests-files
 test: clean
 	# OMP_NUM_THREADS can improve overral performance using one thread by process (on tensorflow), avoiding overload
 	OMP_NUM_THREADS=1 poetry run pytest tests -n $(JOBS) --cov rasa
+
+test-windows: clean
+	# OMP_NUM_THREADS can improve overral performance using one thread by process (on tensorflow), avoiding overload
+	OMP_NUM_THREADS=1 poetry run pytest tests -n $(JOBS) -m "not unix" --cov rasa
 
 doctest: clean
 	cd docs && poetry run make doctest
