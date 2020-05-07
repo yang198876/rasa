@@ -60,7 +60,11 @@ def pipelines_for_tests():
                 "DIETClassifier",
             ),
         ),
-        ("en", as_pipeline("ConveRTTokenizer", "ConveRTFeaturizer", "DIETClassifier")),
+        pytest.param(
+            "en",
+            as_pipeline("ConveRTTokenizer", "ConveRTFeaturizer", "DIETClassifier"),
+            mark=pytest.mark.unix,
+        ),
         (
             "en",
             as_pipeline(

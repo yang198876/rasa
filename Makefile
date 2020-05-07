@@ -99,7 +99,7 @@ test: clean
 
 test-windows: clean
 	# OMP_NUM_THREADS can improve overral performance using one thread by process (on tensorflow), avoiding overload
-	OMP_NUM_THREADS=1 poetry run pytest tests -n $(JOBS) -m "not requires_tensorflow_text" --cov rasa
+	OMP_NUM_THREADS=1 poetry run pytest tests -n $(JOBS) -m "not unix" --cov rasa
 
 doctest: clean
 	cd docs && poetry run make doctest

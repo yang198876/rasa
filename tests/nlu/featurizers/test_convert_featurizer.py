@@ -10,7 +10,7 @@ from rasa.nlu.config import RasaNLUModelConfig
 from rasa.nlu.featurizers.dense_featurizer.convert_featurizer import ConveRTFeaturizer
 
 
-@pytest.mark.requires_tensorflow_text
+@pytest.mark.unix
 def test_convert_featurizer_process():
     featurizer = ConveRTFeaturizer.create({}, RasaNLUModelConfig())
 
@@ -34,7 +34,7 @@ def test_convert_featurizer_process():
     assert np.allclose(vecs[-1][:5], expected_cls, atol=1e-5)
 
 
-@pytest.mark.requires_tensorflow_text
+@pytest.mark.unix
 def test_convert_featurizer_train():
     featurizer = ConveRTFeaturizer.create({}, RasaNLUModelConfig())
 
@@ -80,7 +80,7 @@ def test_convert_featurizer_train():
         ("ńöñàśçií", "ńöñàśçií"),
     ],
 )
-@pytest.mark.requires_tensorflow_text
+@pytest.mark.unix
 def test_convert_featurizer_tokens_to_text(sentence, expected_text):
     tokens = ConveRTTokenizer().tokenize(Message(sentence), attribute=TEXT)
 

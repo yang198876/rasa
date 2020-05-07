@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import pytest
 import sqlalchemy
 import uuid
+import os
 
 from _pytest.capture import CaptureFixture
 from _pytest.logging import LogCaptureFixture
@@ -45,6 +46,7 @@ from rasa.core.tracker_store import (
 from rasa.core.trackers import DialogueStateTracker
 from rasa.utils.endpoints import EndpointConfig, read_endpoint_config
 from tests.core.conftest import DEFAULT_ENDPOINTS_FILE, MockedMongoTrackerStore
+from tests.utilities import write_file_config
 
 domain = Domain.load("data/test_domains/default.yml")
 
@@ -357,11 +359,8 @@ def test_db_url_with_query_from_endpoint_config():
         another: query
     """
 
-    with tempfile.NamedTemporaryFile("w+", suffix="_tmp_config_file.yml") as f:
-        f.write(endpoint_config)
-        f.flush()
-        store_config = read_endpoint_config(f.name, "tracker_store")
-
+    filename = write_file_config(endpoint_config)
+    store_config = read_endpoint_config(filename, "tracker_store")
     url = SQLTrackerStore.get_db_url(**store_config.kwargs)
 
     import itertools
