@@ -8,6 +8,8 @@ help:
 	@echo "        Remove Python/build artifacts."
 	@echo "    install"
 	@echo "        Install rasa."
+	@echo "    install-full"
+	@echo "        Install rasa with all extras (transformers, tensorflow_text, spacy, jieba)."
 	@echo "    formatter"
 	@echo "        Apply black formatting to code."
 	@echo "    lint"
@@ -54,6 +56,10 @@ install-mitie:
 install-full: install install-mitie
 	poetry install -E full
 
+install-full-windows: install install-mitie
+	# because tensorflow_text is not available on Windows
+	poetry install -E spacy -E transformers -E jieba
+
 formatter:
 	poetry run black rasa tests
 
@@ -65,7 +71,7 @@ types:
 	poetry run pytype --keep-going rasa -j 16
 
 prepare-tests-files:
-	poetry install --extras spacy
+	poetry install -E spacy
 	poetry run python -m spacy download en_core_web_md
 	poetry run python -m spacy download de_core_news_sm
 	poetry run python -m spacy link en_core_web_md en --force
@@ -93,7 +99,7 @@ test: clean
 
 test-windows: clean
 	# OMP_NUM_THREADS can improve overral performance using one thread by process (on tensorflow), avoiding overload
-	OMP_NUM_THREADS=1 poetry run pytest tests -n $(JOBS) -m "not unix" --cov rasa
+	OMP_NUM_THREADS=1 poetry run pytest tests -n $(JOBS) -m "not requires_tensorflow_text" --cov rasa
 
 doctest: clean
 	cd docs && poetry run make doctest
