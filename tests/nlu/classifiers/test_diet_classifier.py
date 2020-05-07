@@ -100,7 +100,7 @@ def test_check_labels_features_exist(messages, expected):
                 {"name": "ConveRTFeaturizer"},
                 {"name": "DIETClassifier", MASKED_LM: True, EPOCHS: 1},
             ],
-            mark=pytest.mark.unix,
+            marks=pytest.mark.unix,
         ),
         [
             {"name": "WhitespaceTokenizer"},

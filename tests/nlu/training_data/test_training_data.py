@@ -1,5 +1,4 @@
 import pytest
-import tempfile
 
 from rasa.nlu.constants import TEXT, RESPONSE_KEY_ATTRIBUTE
 from rasa.nlu import training_data
