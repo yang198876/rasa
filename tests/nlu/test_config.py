@@ -94,6 +94,7 @@ def test_missing_property(pipeline_config):
 @pytest.mark.parametrize(
     "pipeline_template", list(registered_pipeline_templates.keys())
 )
+@pytest.mark.unix
 def test_pipeline_registry_lookup(pipeline_template: Text):
     args = {"pipeline": pipeline_template}
     f = write_file_config(yaml.safe_dump(args))
