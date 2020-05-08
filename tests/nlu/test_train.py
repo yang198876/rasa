@@ -60,10 +60,9 @@ def pipelines_for_tests():
                 "DIETClassifier",
             ),
         ),
-        pytest.param(
+        (
             "en",
             as_pipeline("ConveRTTokenizer", "ConveRTFeaturizer", "DIETClassifier"),
-            marks=pytest.mark.unix,
         ),
         (
             "en",
@@ -80,6 +79,7 @@ def pipelines_for_tests():
     ]
 
 
+@pytest.mark.unix
 def test_all_components_are_in_at_least_one_test_pipeline():
     """There is a template that includes all components to
     test the train-persist-load-use cycle. Ensures that
@@ -93,6 +93,7 @@ def test_all_components_are_in_at_least_one_test_pipeline():
         ), "`all_components` template is missing component."
 
 
+@pytest.mark.unix
 @pytest.mark.parametrize("language, pipeline", pipelines_for_tests())
 async def test_train_persist_load_parse(language, pipeline, component_builder, tmpdir):
     _config = RasaNLUModelConfig({"pipeline": pipeline, "language": language})
@@ -112,6 +113,7 @@ async def test_train_persist_load_parse(language, pipeline, component_builder, t
     assert loaded.parse("Rasa is great!") is not None
 
 
+@pytest.mark.unix
 @pytest.mark.parametrize("language, pipeline", pipelines_for_tests())
 def test_train_model_without_data(language, pipeline, component_builder, tmpdir):
     _config = RasaNLUModelConfig({"pipeline": pipeline, "language": language})
@@ -126,6 +128,7 @@ def test_train_model_without_data(language, pipeline, component_builder, tmpdir)
     assert loaded.parse("Rasa is great!") is not None
 
 
+@pytest.mark.unix
 @pytest.mark.parametrize("language, pipeline", pipelines_for_tests())
 def test_load_and_persist_without_train(language, pipeline, component_builder, tmpdir):
     _config = RasaNLUModelConfig({"pipeline": pipeline, "language": language})
