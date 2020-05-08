@@ -183,7 +183,6 @@ def background_server(
 
 
 @pytest.fixture()
-@pytest.mark.unix
 def training_request(shared_statuses: DictProxy) -> Generator[Process, None, None]:
     def send_request() -> None:
 
@@ -208,6 +207,7 @@ def training_request(shared_statuses: DictProxy) -> Generator[Process, None, Non
     train_request.terminate()
 
 
+@pytest.mark.unix
 def test_train_status_is_not_blocked_by_training(
     background_server: Process, shared_statuses: DictProxy, training_request: Process
 ):
