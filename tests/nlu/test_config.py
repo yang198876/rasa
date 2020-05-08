@@ -97,9 +97,9 @@ def test_missing_property(pipeline_config):
 @pytest.mark.unix
 def test_pipeline_registry_lookup(pipeline_template: Text):
     args = {"pipeline": pipeline_template}
-    f = write_file_config(yaml.safe_dump(args))
+    filename = write_file_config(yaml.safe_dump(args))
 
-    final_config = config.load(f.name)
+    final_config = config.load(filename)
     components = [c for c in final_config.pipeline]
 
     assert json.dumps(components, sort_keys=True) == json.dumps(
