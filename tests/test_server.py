@@ -183,6 +183,7 @@ def background_server(
 
 
 @pytest.fixture()
+@pytest.mark.unix
 def training_request(shared_statuses: DictProxy) -> Generator[Process, None, None]:
     def send_request() -> None:
 
@@ -689,7 +690,7 @@ def test_pushing_event(rasa_app: SanicTestClient, event: Event):
     evt = tracker.get("events")[0]
     deserialised_event = Event.from_parameters(evt)
     assert deserialised_event == event
-    assert deserialised_event.timestamp > time_before_adding_events
+    assert deserialised_event.timestamp >= time_before_adding_events
 
 
 def test_push_multiple_events(rasa_app: SanicTestClient):

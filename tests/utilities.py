@@ -11,9 +11,9 @@ from rasa.nlu.selectors.response_selector import ResponseSelector
 from rasa.utils.tensorflow.constants import EPOCHS
 
 
-def write_temp_file(contents, suffix) -> Text:
+def write_temp_file(contents, suffix, mode="w+") -> Text:
     filename = os.path.join(tempfile.gettempdir(), os.urandom(24).hex() + suffix)
-    with open(filename, "w+") as f:
+    with open(filename, mode) as f:
         f.write(contents)
         f.flush()
     return filename

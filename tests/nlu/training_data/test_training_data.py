@@ -281,7 +281,7 @@ def test_repeated_entities():
 }"""
 
     filename = write_temp_file(
-        data.encode(io_utils.DEFAULT_ENCODING), "_tmp_training_data.json"
+        data.encode(io_utils.DEFAULT_ENCODING), "_tmp_training_data.json", "wb+"
     )
     td = training_data.load_data(filename)
     assert len(td.entity_examples) == 1
@@ -315,7 +315,7 @@ def test_multiword_entities():
   }
 }"""
     filename = write_temp_file(
-        data.encode(io_utils.DEFAULT_ENCODING), "_tmp_training_data.json"
+        data.encode(io_utils.DEFAULT_ENCODING), "_tmp_training_data.json", "wb+"
     )
     td = training_data.load_data(filename)
     assert len(td.entity_examples) == 1
@@ -347,7 +347,7 @@ def test_nonascii_entities():
   ]
 }"""
     filename = write_temp_file(
-        data.encode(io_utils.DEFAULT_ENCODING), "_tmp_training_data.json"
+        data.encode(io_utils.DEFAULT_ENCODING), "_tmp_training_data.json", "wb+"
     )
     td = training_data.load_data(filename)
     assert len(td.entity_examples) == 1
@@ -400,7 +400,7 @@ def test_entities_synonyms():
   }
 }"""
     filename = write_temp_file(
-        data.encode(io_utils.DEFAULT_ENCODING), "_tmp_training_data.json"
+        data.encode(io_utils.DEFAULT_ENCODING), "_tmp_training_data.json", "wb+"
     )
     td = training_data.load_data(filename)
     assert td.entity_synonyms["New York City"] == "nyc"
