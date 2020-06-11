@@ -120,7 +120,9 @@ def _find_core_nlu_files_in_directory(directory: Text,) -> Tuple[Set[Text], Set[
 
 def _is_valid_filetype(path: Text) -> bool:
     is_file = os.path.isfile(path)
-    is_datafile = path.endswith(".json") or path.endswith(".md")
+    is_datafile = (
+        path.endswith(".json") or path.endswith(".md") or path.endswith(".yml")
+    )
 
     return is_file and is_datafile
 
@@ -147,24 +149,26 @@ def is_story_file(file_path: Text) -> bool:
         `True` if it's a story file, otherwise `False`.
     """
 
-    if not file_path.endswith(".md"):
-        return False
+    if file_path.endswith(".md"):
+        try:
+            with open(
+                file_path, encoding=DEFAULT_ENCODING, errors="surrogateescape"
+            ) as lines:
+                return any(_contains_story_pattern(line) for line in lines)
+        except Exception as e:
+            # catch-all because we might be loading files we are not expecting to load
+            logger.error(
+                f"Tried to check if '{file_path}' is a story file, but failed to "
+                f"read it. If this file contains story data, you should "
+                f"investigate this error, otherwise it is probably best to "
+                f"move the file to a different location. "
+                f"Error: {e}"
+            )
+            return False
+    elif file_path.endswith(".yml"):
+        return True
 
-    try:
-        with open(
-            file_path, encoding=DEFAULT_ENCODING, errors="surrogateescape"
-        ) as lines:
-            return any(_contains_story_pattern(line) for line in lines)
-    except Exception as e:
-        # catch-all because we might be loading files we are not expecting to load
-        logger.error(
-            f"Tried to check if '{file_path}' is a story file, but failed to "
-            f"read it. If this file contains story data, you should "
-            f"investigate this error, otherwise it is probably best to "
-            f"move the file to a different location. "
-            f"Error: {e}"
-        )
-        return False
+    return False
 
 
 def _contains_story_pattern(text: Text) -> bool:
