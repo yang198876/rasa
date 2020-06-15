@@ -13,6 +13,7 @@ from typing import (
     List,
     Deque,
     Iterable,
+    Tuple,
 )
 
 from rasa.nlu.constants import (
@@ -35,6 +36,7 @@ from rasa.core.events import (  # pytype: disable=pyi-error
     BotUttered,
     Form,
     SessionStarted,
+    ActionExecutionRejected,
 )
 from rasa.core.domain import Domain  # pytype: disable=pyi-error
 from rasa.core.slots import Slot
@@ -398,7 +400,9 @@ class DialogueStateTracker:
     def applied_events(self) -> List[Event]:
         """Returns all actions that should be applied - w/o reverted events."""
 
-        def undo_till_previous(event_type, done_events):
+        def undo_till_previous(
+            event_type: Type[Event], done_events: List[Event]
+        ) -> None:
             """Removes events from `done_events` until the first
                occurrence `event_type` is found which is also removed."""
             # list gets modified - hence we need to copy events!
@@ -407,8 +411,16 @@ class DialogueStateTracker:
                 if isinstance(e, event_type):
                     break
 
+        form_names = [
+            event.name
+            for event in self.events
+            if isinstance(event, Form) and event.name
+        ]
+
         applied_events = []
-        for event in self.events:
+        unfeaturized_loop_events = None
+
+        for idx, event in enumerate(self.events):
             if isinstance(event, (Restarted, SessionStarted)):
                 applied_events = []
             elif isinstance(event, ActionReverted):
@@ -420,10 +432,82 @@ class DialogueStateTracker:
                 # the `action_listen` action right before it).
                 undo_till_previous(UserUttered, applied_events)
                 undo_till_previous(ActionExecuted, applied_events)
+            elif self._is_part_of_loop(event, form_names, unfeaturized_loop_events):
+                (
+                    unfeaturized_loop_events,
+                    events_to_apply,
+                ) = self.handle_loop_unfeaturization(
+                    idx, event, unfeaturized_loop_events, form_names
+                )
+                applied_events += events_to_apply
             else:
                 applied_events.append(event)
 
         return applied_events
+
+    @staticmethod
+    def _is_part_of_loop(
+        event: Event,
+        form_names: List[Text],
+        currently_unfeaturized_loop_events: List[Event],
+    ) -> bool:
+        if (
+            isinstance(event, (ActionExecutionRejected, ActionExecuted))
+            and event.action_name in form_names
+        ):
+            return True
+
+        if isinstance(event, Form):
+            return True
+
+        if currently_unfeaturized_loop_events is None or isinstance(event, SlotSet):
+            return False
+
+        return True
+
+    def handle_loop_unfeaturization(
+        self,
+        idx: int,
+        event: Event,
+        currently_unfeaturized_loop_events: List[Event],
+        form_names: List[Text],
+    ) -> Tuple[Optional[List[Event]], List[Event]]:
+        is_deactivation = isinstance(event, Form) and not event.name
+        if is_deactivation:
+            return None, [event]
+
+        if isinstance(event, (Form, ActionExecutionRejected)):
+            return currently_unfeaturized_loop_events, [event]
+
+        is_form_action = (
+            isinstance(event, ActionExecuted) and event.action_name in form_names
+        )
+
+        # We are at the start of a happy path or returning after an unhappy path
+        if is_form_action and currently_unfeaturized_loop_events is None:
+            return [], [event]
+
+        # We are entering an unhappy path. The causing events should be featurized.
+        if is_form_action and self._upcoming_rejection(idx):
+            return None, currently_unfeaturized_loop_events
+
+        # We continue on a happy path
+        if is_form_action:
+            return None, []
+
+        # Action or user message which is unfeaturized
+        currently_unfeaturized_loop_events.append(event)
+        return currently_unfeaturized_loop_events, []
+
+    def _upcoming_rejection(self, index: int) -> bool:
+        return next(
+            (
+                isinstance(e, ActionExecutionRejected)
+                for e in list(self.events)[index + 1 :]
+                if isinstance(e, (ActionExecutionRejected, ActionExecuted))
+            ),
+            False,
+        )
 
     def replay_events(self) -> None:
         """Update the tracker based on a list of events."""
