@@ -216,6 +216,8 @@ class ResponseSelector(DIETClassifier):
         # Specify what features to use as sequence and sentence features
         # By default all features in the pipeline are used.
         FEATURIZERS: [],
+        "sequence_features": [],
+        "sentence_features": [],
     }
 
     def __init__(

@@ -21,7 +21,7 @@ from rasa.nlu.test import determine_token_labels
 from rasa.nlu.classifiers import LABEL_RANKING_LENGTH
 from rasa.utils import train_utils
 from rasa.utils.tensorflow import layers
-from rasa.utils.tensorflow.transformer import TransformerEncoder
+from rasa.utils.tensorflow.transformer import TransformerEncoder, MultiHeadAttention
 from rasa.utils.tensorflow.models import RasaModel
 from rasa.utils.tensorflow.model_data import RasaModelData, FeatureSignature
 from rasa.nlu.constants import (
@@ -175,7 +175,7 @@ class DIETClassifier(IntentClassifier, EntityExtractor):
         # Default dense dimension to use if no dense features are present.
         DENSE_DIMENSION: {TEXT: 512, LABEL: 20},
         # Default dimension to use for concatenating sequence and sentence features.
-        CONCAT_DIMENSION: {TEXT: 512, LABEL: 20},
+        CONCAT_DIMENSION: {TEXT: 256, LABEL: 20},
         # The number of incorrect labels. The algorithm will minimize
         # their similarity to the user input during training.
         NUM_NEG: 20,
@@ -246,6 +246,8 @@ class DIETClassifier(IntentClassifier, EntityExtractor):
         # Specify what features to use as sequence and sentence features
         # By default all features in the pipeline are used.
         FEATURIZERS: [],
+        "sequence_features": [],
+        "sentence_features": [],
     }
 
     # init helpers
@@ -440,9 +442,15 @@ class DIETClassifier(IntentClassifier, EntityExtractor):
         (
             sparse_sequence_features,
             sparse_sentence_features,
-        ) = message.get_sparse_features(attribute, self.component_config[FEATURIZERS])
+        ) = message.get_sparse_features(
+            attribute,
+            self.component_config["sequence_features"],
+            self.component_config["sentence_features"],
+        )
         dense_sequence_features, dense_sentence_features = message.get_dense_features(
-            attribute, self.component_config[FEATURIZERS]
+            attribute,
+            self.component_config["sequence_features"],
+            self.component_config["sentence_features"],
         )
 
         if dense_sequence_features is not None and sparse_sequence_features is not None:
@@ -1313,7 +1321,14 @@ class DIET(RasaModel):
                 )
 
     def _prepare_input_layers(self, name: Text) -> None:
-        self._tf_layers[f"ffnn.{name}"] = layers.Ffnn(
+        self._tf_layers[f"ffnn.sen.{name}"] = layers.Ffnn(
+            self.config[HIDDEN_LAYERS_SIZES][name],
+            self.config[DROP_RATE],
+            self.config[REGULARIZATION_CONSTANT],
+            self.config[WEIGHT_SPARSITY],
+            name,
+        )
+        self._tf_layers[f"ffnn.seq.{name}"] = layers.Ffnn(
             self.config[HIDDEN_LAYERS_SIZES][name],
             self.config[DROP_RATE],
             self.config[REGULARIZATION_CONSTANT],
@@ -1387,6 +1402,17 @@ class DIET(RasaModel):
         else:
             # create lambda so that it can be used later without the check
             self._tf_layers[f"{name}_transformer"] = lambda x, mask, training: x
+
+        self._tf_layers[f"{name}_attention"] = MultiHeadAttention(
+            self.config[TRANSFORMER_SIZE],
+            self.config[NUM_HEADS],
+            self.config[DROP_RATE_ATTENTION],
+            self.config[WEIGHT_SPARSITY],
+            self.config[UNIDIRECTIONAL_ENCODER],
+            self.config[KEY_RELATIVE_ATTENTION],
+            self.config[VALUE_RELATIVE_ATTENTION],
+            self.config[MAX_RELATIVE_POSITION],
+        )
 
     def _prepare_mask_lm_layers(self, name: Text) -> None:
         self._tf_layers[f"{name}_input_mask"] = layers.InputMask()
@@ -1475,17 +1501,16 @@ class DIET(RasaModel):
 
         return None
 
-    def _combine_sequence_sentence_features(
+    def _combine_features(
         self,
         sequence_features: List[Union[tf.Tensor, tf.SparseTensor]],
         sentence_features: List[Union[tf.Tensor, tf.SparseTensor]],
         mask_sequence: tf.Tensor,
         mask_sentence: tf.Tensor,
-        mask_text: tf.Tensor,
         name: Text,
         sparse_dropout: bool = False,
         dense_dropout: bool = False,
-    ) -> tf.Tensor:
+    ) -> Tuple[tf.Tensor, tf.Tensor]:
         sequence_x = self._combine_sparse_dense_features(
             sequence_features,
             mask_sequence,
@@ -1500,6 +1525,16 @@ class DIET(RasaModel):
             sparse_dropout,
             dense_dropout,
         )
+
+        return sequence_x, sentence_x
+
+    def _combine_sequence_sentence_features(
+        self,
+        sequence_x: tf.Tensor,
+        sentence_x: tf.Tensor,
+        mask_text: tf.Tensor,
+        name: Text,
+    ) -> tf.Tensor:
 
         if sequence_x is not None and sentence_x is not None:
             if sequence_x.shape[-1] != sentence_x.shape[-1]:
@@ -1548,18 +1583,20 @@ class DIET(RasaModel):
         dense_dropout: bool = False,
     ) -> tf.Tensor:
 
-        x = self._combine_sequence_sentence_features(
+        seq_x, sen_x = self._combine_features(
             sequence_features,
             sentence_features,
             sequence_mask,
             sentence_mask,
-            text_mask,
             name,
             sparse_dropout,
             dense_dropout,
         )
+        seq_x = self._tf_layers[f"ffnn.seq.{name}"](seq_x, self._training)
+        sen_x = self._tf_layers[f"ffnn.sen.{name}"](sen_x, self._training)
+        x = self._combine_sequence_sentence_features(seq_x, sen_x, text_mask, name)
         x = tf.reduce_sum(x, axis=1)  # convert to bag-of-words
-        return self._tf_layers[f"ffnn.{name}"](x, self._training)
+        return x
 
     def _create_sequence(
         self,
@@ -1580,33 +1617,50 @@ class DIET(RasaModel):
         else:
             seq_ids = None
 
-        inputs = self._combine_sequence_sentence_features(
+        seq_inputs, sen_inputs = self._combine_features(
             sequence_features,
             sentence_features,
             mask_sequence,
             mask_sentence,
-            mask,
             name,
             sparse_dropout,
             dense_dropout,
         )
-        inputs = self._tf_layers[f"ffnn.{name}"](inputs, self._training)
+
+        seq_inputs = self._tf_layers[f"ffnn.seq.{name}"](seq_inputs, self._training)
+        sen_inputs = self._tf_layers[f"ffnn.sen.{name}"](sen_inputs, self._training)
 
         if masked_lm_loss:
-            transformer_inputs, lm_mask_bool = self._tf_layers[f"{name}_input_mask"](
-                inputs, mask, self._training
-            )
+            transformer_seq_inputs, lm_mask_bool = self._tf_layers[
+                f"{name}_input_mask"
+            ](seq_inputs, mask, self._training)
         else:
-            transformer_inputs = inputs
+            transformer_seq_inputs = seq_inputs
             lm_mask_bool = None
 
         outputs = self._tf_layers[f"{name}_transformer"](
-            transformer_inputs, 1 - mask, self._training
+            transformer_seq_inputs, 1 - mask_sequence, self._training
         )
 
         if self.config[NUM_TRANSFORMER_LAYERS] > 0:
             # apply activation
             outputs = tfa.activations.gelu(outputs)
+
+        inputs = self._combine_sequence_sentence_features(
+            outputs, sen_inputs, mask, name
+        )
+
+        if mask is not None:
+            pad_mask = tf.squeeze(mask, -1)  # (batch_size, length)
+            pad_mask = pad_mask[:, tf.newaxis, tf.newaxis, :]
+            # pad_mask.shape = (batch_size, 1, 1, length)
+            if self.config[UNIDIRECTIONAL_ENCODER]:
+                # add look ahead pad mask to emulate unidirectional behavior
+                pad_mask = tf.minimum(
+                    1.0, pad_mask + self._look_ahead_pad_mask(tf.shape(pad_mask)[-1])
+                )  # (batch_size, 1, length, length)
+
+        outputs = self._tf_layers[f"{name}_attention"](inputs, inputs, 1 - pad_mask)[0]
 
         return outputs, inputs, seq_ids, lm_mask_bool
 

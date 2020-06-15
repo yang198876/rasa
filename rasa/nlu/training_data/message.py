@@ -126,7 +126,10 @@ class Message:
             return split_title[0], None
 
     def get_sparse_features(
-        self, attribute: Text, featurizers: Optional[List[Text]] = None
+        self,
+        attribute: Text,
+        seq_featurizers: Optional[List[Text]] = None,
+        sen_featurizers: Optional[List[Text]] = None,
     ) -> Tuple[Optional[scipy.sparse.spmatrix], Optional[scipy.sparse.spmatrix]]:
         """Get all sparse features for the given attribute that are coming from the
         given list of featurizers.
@@ -140,11 +143,13 @@ class Message:
         Returns:
             Sparse features.
         """
-        if featurizers is None:
-            featurizers = []
+        if seq_featurizers is None:
+            seq_featurizers = []
+        if sen_featurizers is None:
+            sen_featurizers = []
 
         sequence_features, sentence_features = self._filter_sparse_features(
-            attribute, featurizers
+            attribute, seq_featurizers, sen_featurizers
         )
 
         sequence_features = self._combine_features(sequence_features)
@@ -153,7 +158,10 @@ class Message:
         return sequence_features, sentence_features
 
     def get_dense_features(
-        self, attribute: Text, featurizers: Optional[List[Text]] = None
+        self,
+        attribute: Text,
+        seq_featurizers: Optional[List[Text]] = None,
+        sen_featurizers: Optional[List[Text]] = None,
     ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         """Get all dense features for the given attribute that are coming from the given
         list of featurizers.
@@ -167,11 +175,13 @@ class Message:
         Returns:
             Dense features.
         """
-        if featurizers is None:
-            featurizers = []
+        if seq_featurizers is None:
+            seq_featurizers = []
+        if sen_featurizers is None:
+            sen_featurizers = []
 
         sequence_features, sentence_features = self._filter_dense_features(
-            attribute, featurizers
+            attribute, seq_featurizers, sen_featurizers
         )
 
         sequence_features = self._combine_features(sequence_features)
@@ -180,7 +190,10 @@ class Message:
         return sequence_features, sentence_features
 
     def features_present(
-        self, attribute: Text, featurizers: Optional[List[Text]] = None
+        self,
+        attribute: Text,
+        seq_featurizers: Optional[List[Text]] = None,
+        sen_featurizers: Optional[List[Text]] = None,
     ) -> bool:
         """Check if there are any features present for the given attribute and
         featurizers.
@@ -194,14 +207,16 @@ class Message:
         Returns:
             ``True``, if features are present, ``False`` otherwise
         """
-        if featurizers is None:
-            featurizers = []
+        if seq_featurizers is None:
+            seq_featurizers = []
+        if sen_featurizers is None:
+            sen_featurizers = []
 
         sequence_sparse_features, sentence_sparse_features = self._filter_sparse_features(
-            attribute, featurizers
+            attribute, seq_featurizers, sen_featurizers
         )
         sequence_dense_features, sentence_dense_features = self._filter_dense_features(
-            attribute, featurizers
+            attribute, seq_featurizers, sen_featurizers
         )
 
         return (
@@ -209,7 +224,7 @@ class Message:
         ) or (len(sequence_dense_features) > 0 or len(sentence_dense_features) > 0)
 
     def _filter_dense_features(
-        self, attribute: Text, featurizers: List[Text]
+        self, attribute: Text, seq_featurizers: List[Text], sen_featurizers: List[Text]
     ) -> Tuple[List["Features"], List["Features"]]:
         sentence_features = [
             f
@@ -217,7 +232,7 @@ class Message:
             if f.message_attribute == attribute
             and f.is_dense()
             and f.type == FEATURE_TYPE_SENTENCE
-            and (f.origin in featurizers or not featurizers)
+            and (f.origin in sen_featurizers or not sen_featurizers)
         ]
         sequence_features = [
             f
@@ -225,12 +240,12 @@ class Message:
             if f.message_attribute == attribute
             and f.is_dense()
             and f.type == FEATURE_TYPE_SEQUENCE
-            and (f.origin in featurizers or not featurizers)
+            and (f.origin in seq_featurizers or not seq_featurizers)
         ]
         return sequence_features, sentence_features
 
     def _filter_sparse_features(
-        self, attribute: Text, featurizers: List[Text]
+        self, attribute: Text, seq_featurizers: List[Text], sen_featurizers: List[Text]
     ) -> Tuple[List["Features"], List["Features"]]:
         sentence_features = [
             f
@@ -238,7 +253,7 @@ class Message:
             if f.message_attribute == attribute
             and f.is_sparse()
             and f.type == FEATURE_TYPE_SENTENCE
-            and (f.origin in featurizers or not featurizers)
+            and (f.origin in sen_featurizers or not sen_featurizers)
         ]
         sequence_features = [
             f
@@ -246,7 +261,7 @@ class Message:
             if f.message_attribute == attribute
             and f.is_sparse()
             and f.type == FEATURE_TYPE_SEQUENCE
-            and (f.origin in featurizers or not featurizers)
+            and (f.origin in seq_featurizers or not seq_featurizers)
         ]
 
         return sequence_features, sentence_features
