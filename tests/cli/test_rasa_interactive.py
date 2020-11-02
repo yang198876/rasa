@@ -8,6 +8,7 @@ from _pytest.pytester import RunResult
 
 import rasa
 from rasa.cli import interactive, train
+from tests.conftest import DEFAULT_NLU_DATA
 
 
 def test_interactive_help(run: Callable[..., RunResult]):
@@ -22,9 +23,10 @@ def test_interactive_help(run: Callable[..., RunResult]):
                         {core} ... [model-as-positional-argument]"""
 
     lines = help_text.split("\n")
-
-    for i, line in enumerate(lines):
-        assert output.outlines[i] == line
+    # expected help text lines should appear somewhere in the output
+    printed_help = set(output.outlines)
+    for line in lines:
+        assert line in printed_help
 
 
 def test_interactive_core_help(run: Callable[..., RunResult]):
@@ -39,9 +41,10 @@ def test_interactive_core_help(run: Callable[..., RunResult]):
                              [model-as-positional-argument]"""
 
     lines = help_text.split("\n")
-
-    for i, line in enumerate(lines):
-        assert output.outlines[i] == line
+    # expected help text lines should appear somewhere in the output
+    printed_help = set(output.outlines)
+    for line in lines:
+        assert line in printed_help
 
 
 def test_pass_arguments_to_rasa_train(
@@ -110,7 +113,7 @@ def test_train_core_called_when_no_model_passed_and_core(
             "--config",
             default_stack_config,
             "--stories",
-            "examples/moodbot/data/stories.md",
+            "examples/moodbot/data/stories.yml",
             "--domain",
             "examples/moodbot/domain.yml",
         ]
@@ -136,13 +139,7 @@ def test_no_interactive_without_core_data(
     interactive.add_subparser(sub_parser, [])
 
     args = parser.parse_args(
-        [
-            "interactive",
-            "--config",
-            default_stack_config,
-            "--data",
-            "examples/moodbot/data/nlu.md",
-        ]
+        ["interactive", "--config", default_stack_config, "--data", DEFAULT_NLU_DATA]
     )
     interactive._set_not_required_args(args)
 

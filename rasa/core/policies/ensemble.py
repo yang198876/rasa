@@ -5,29 +5,41 @@ import os
 import sys
 from collections import defaultdict
 from datetime import datetime
-from typing import Text, Optional, Any, List, Dict, Tuple, Set, NamedTuple
+from pathlib import Path
+from typing import Text, Optional, Any, List, Dict, Tuple, NamedTuple, Union
 
 import rasa.core
+import rasa.core.training.training
+from rasa.shared.exceptions import RasaException
+import rasa.shared.utils.common
+import rasa.shared.utils.io
 import rasa.utils.io
-from rasa.constants import MINIMUM_COMPATIBLE_VERSION, DOCS_BASE_URL, DOCS_URL_POLICIES
-
-from rasa.core import utils
-from rasa.core.constants import USER_INTENT_BACK, USER_INTENT_RESTART
-from rasa.core.actions.action import (
-    ACTION_LISTEN_NAME,
-    ACTION_BACK_NAME,
-    ACTION_RESTART_NAME,
+from rasa.constants import MINIMUM_COMPATIBLE_VERSION
+from rasa.shared.constants import (
+    DOCS_URL_RULES,
+    DOCS_URL_POLICIES,
+    DOCS_URL_MIGRATION_GUIDE,
+    DEFAULT_CONFIG_PATH,
 )
-from rasa.core.domain import Domain
-from rasa.core.events import SlotSet, ActionExecuted, ActionExecutionRejected, Event
+from rasa.shared.core.constants import (
+    USER_INTENT_BACK,
+    USER_INTENT_RESTART,
+    ACTION_LISTEN_NAME,
+    ACTION_RESTART_NAME,
+    ACTION_BACK_NAME,
+)
+from rasa.shared.core.domain import InvalidDomain, Domain
+from rasa.shared.core.events import ActionExecutionRejected, ActionExecuted
 from rasa.core.exceptions import UnsupportedDialogueModelError
-from rasa.core.featurizers import MaxHistoryTrackerFeaturizer
-from rasa.core.policies.policy import Policy
+from rasa.core.featurizers.tracker_featurizers import MaxHistoryTrackerFeaturizer
+from rasa.shared.nlu.interpreter import NaturalLanguageInterpreter, RegexInterpreter
+from rasa.core.policies.policy import Policy, SupportedData
 from rasa.core.policies.fallback import FallbackPolicy
 from rasa.core.policies.memoization import MemoizationPolicy, AugmentedMemoizationPolicy
-from rasa.core.trackers import DialogueStateTracker
+from rasa.core.policies.rule_policy import RulePolicy
+from rasa.shared.core.trackers import DialogueStateTracker
+from rasa.shared.core.generator import TrackerWithCachedStates
 from rasa.core import registry
-from rasa.utils.common import class_from_module_path, raise_warning
 
 logger = logging.getLogger(__name__)
 
@@ -36,15 +48,14 @@ class PolicyEnsemble:
     versioned_packages = ["rasa", "tensorflow", "sklearn"]
 
     def __init__(
-        self, policies: List[Policy], action_fingerprints: Optional[Dict] = None
+        self,
+        policies: List[Policy],
+        action_fingerprints: Optional[Dict[Any, Dict[Text, List]]] = None,
     ) -> None:
         self.policies = policies
         self.date_trained = None
 
-        if action_fingerprints:
-            self.action_fingerprints = action_fingerprints
-        else:
-            self.action_fingerprints = {}
+        self.action_fingerprints = action_fingerprints
 
         self._check_priorities()
         self._check_for_important_policies()
@@ -52,31 +63,14 @@ class PolicyEnsemble:
     def _check_for_important_policies(self) -> None:
         from rasa.core.policies.mapping_policy import MappingPolicy
 
-        if not any(isinstance(policy, MappingPolicy) for policy in self.policies):
+        if not any(
+            isinstance(policy, (MappingPolicy, RulePolicy)) for policy in self.policies
+        ):
             logger.info(
-                "MappingPolicy not included in policy ensemble. Default intents "
-                "'{} and {} will not trigger actions '{}' and '{}'."
-                "".format(
-                    USER_INTENT_RESTART,
-                    USER_INTENT_BACK,
-                    ACTION_RESTART_NAME,
-                    ACTION_BACK_NAME,
-                )
+                f"MappingPolicy not included in policy ensemble. Default intents "
+                f"'{USER_INTENT_RESTART} and {USER_INTENT_BACK} will not trigger "
+                f"actions '{ACTION_RESTART_NAME}' and '{ACTION_BACK_NAME}'."
             )
-
-    @staticmethod
-    def _training_events_from_trackers(training_trackers) -> Dict[Text, Set[Event]]:
-        events_metadata = defaultdict(set)
-
-        for t in training_trackers:
-            tracker = t.init_copy()
-            for event in t.events:
-                tracker.update(event)
-                if not isinstance(event, ActionExecuted):
-                    action_name = tracker.latest_action_name
-                    events_metadata[action_name].add(event)
-
-        return events_metadata
 
     @staticmethod
     def check_domain_ensemble_compatibility(
@@ -84,17 +78,18 @@ class PolicyEnsemble:
     ) -> None:
         """Check for elements that only work with certain policy/domain combinations."""
 
-        from rasa.core.policies.form_policy import FormPolicy
         from rasa.core.policies.mapping_policy import MappingPolicy
         from rasa.core.policies.two_stage_fallback import TwoStageFallbackPolicy
 
         policies_needing_validation = [
-            FormPolicy,
             MappingPolicy,
             TwoStageFallbackPolicy,
+            RulePolicy,
         ]
         for policy in policies_needing_validation:
             policy.validate_against_domain(ensemble, domain)
+
+        _check_policy_for_forms_available(domain, ensemble)
 
     def _check_priorities(self) -> None:
         """Checks for duplicate policy priorities within PolicyEnsemble."""
@@ -105,7 +100,7 @@ class PolicyEnsemble:
 
         for k, v in priority_dict.items():
             if len(v) > 1:
-                raise_warning(
+                rasa.shared.utils.io.raise_warning(
                     f"Found policies {v} with same priority {k} "
                     f"in PolicyEnsemble. When personalizing "
                     f"priorities, be sure to give all policies "
@@ -113,25 +108,102 @@ class PolicyEnsemble:
                     docs=DOCS_URL_POLICIES,
                 )
 
+    def _policy_ensemble_contains_policy_with_rules_support(self) -> bool:
+        """Determine whether the policy ensemble contains at least one policy
+        supporting rule-based data.
+
+        Returns:
+            Whether or not the policy ensemble contains at least one policy that
+            supports rule-based data.
+        """
+        return any(
+            policy.supported_data()
+            in [SupportedData.RULE_DATA, SupportedData.ML_AND_RULE_DATA]
+            for policy in self.policies
+        )
+
+    @staticmethod
+    def _training_trackers_contain_rule_trackers(
+        training_trackers: List[DialogueStateTracker],
+    ) -> bool:
+        """Determine whether there are rule-based training trackers.
+
+        Args:
+            training_trackers: Trackers to inspect.
+
+        Returns:
+            Whether or not any of the supplied training trackers contain rule-based
+            data.
+        """
+        return any(tracker.is_rule_tracker for tracker in training_trackers)
+
+    def _emit_rule_policy_warning(
+        self, training_trackers: List[DialogueStateTracker]
+    ) -> None:
+        """Emit `UserWarning`s about missing rule-based data."""
+        is_rules_consuming_policy_available = (
+            self._policy_ensemble_contains_policy_with_rules_support()
+        )
+        training_trackers_contain_rule_trackers = self._training_trackers_contain_rule_trackers(
+            training_trackers
+        )
+
+        if (
+            is_rules_consuming_policy_available
+            and not training_trackers_contain_rule_trackers
+        ):
+            rasa.shared.utils.io.raise_warning(
+                f"Found a rule-based policy in your pipeline but "
+                f"no rule-based training data. Please add rule-based "
+                f"stories to your training data or "
+                f"remove the rule-based policy (`{RulePolicy.__name__}`) from your "
+                f"your pipeline.",
+                docs=DOCS_URL_RULES,
+            )
+        elif (
+            not is_rules_consuming_policy_available
+            and training_trackers_contain_rule_trackers
+        ):
+            rasa.shared.utils.io.raise_warning(
+                f"Found rule-based training data but no policy supporting rule-based "
+                f"data. Please add `{RulePolicy.__name__}` or another rule-supporting "
+                f"policy to the `policies` section in `{DEFAULT_CONFIG_PATH}`.",
+                docs=DOCS_URL_RULES,
+            )
+
     def train(
         self,
-        training_trackers: List[DialogueStateTracker],
+        training_trackers: List[TrackerWithCachedStates],
         domain: Domain,
+        interpreter: NaturalLanguageInterpreter,
         **kwargs: Any,
     ) -> None:
         if training_trackers:
-            for policy in self.policies:
-                policy.train(training_trackers, domain, **kwargs)
+            self._emit_rule_policy_warning(training_trackers)
 
-            training_events = self._training_events_from_trackers(training_trackers)
-            self.action_fingerprints = self._create_action_fingerprints(training_events)
+            for policy in self.policies:
+                trackers_to_train = SupportedData.trackers_for_policy(
+                    policy, training_trackers
+                )
+                policy.train(
+                    trackers_to_train, domain, interpreter=interpreter, **kwargs
+                )
+
+            self.action_fingerprints = rasa.core.training.training.create_action_fingerprints(
+                training_trackers, domain
+            )
         else:
             logger.info("Skipped training, because there are no training samples.")
+
         self.date_trained = datetime.now().strftime("%Y%m%d-%H%M%S")
 
     def probabilities_using_best_policy(
-        self, tracker: DialogueStateTracker, domain: Domain
-    ) -> Tuple[Optional[List[float]], Optional[Text]]:
+        self,
+        tracker: DialogueStateTracker,
+        domain: Domain,
+        interpreter: NaturalLanguageInterpreter,
+        **kwargs: Any,
+    ) -> Tuple[List[float], Optional[Text]]:
         raise NotImplementedError
 
     def _max_histories(self) -> List[Optional[int]]:
@@ -145,30 +217,13 @@ class PolicyEnsemble:
                 max_histories.append(None)
         return max_histories
 
-    @staticmethod
-    def _create_action_fingerprints(
-        training_events: Dict[Text, Set[Event]]
-    ) -> Optional[Dict[Any, Dict[Text, List]]]:
-        """Fingerprint each action using the events it created during train.
-
-        This allows us to emit warnings when the model is used
-        if an action does things it hasn't done during training."""
-        if not training_events:
-            return None
-
-        action_fingerprints = {}
-        for k, vs in training_events.items():
-            slots = list({v.key for v in vs if isinstance(v, SlotSet)})
-            action_fingerprints[k] = {"slots": slots}
-        return action_fingerprints
-
     def _add_package_version_info(self, metadata: Dict[Text, Any]) -> None:
         """Adds version info for self.versioned_packages to metadata."""
 
         for package_name in self.versioned_packages:
             try:
                 p = importlib.import_module(package_name)
-                v = p.__version__  # pytype: disable=attribute-error
+                v = p.__version__
                 metadata[package_name] = v
             except ImportError:
                 pass
@@ -178,9 +233,11 @@ class PolicyEnsemble:
 
         # make sure the directory we persist exists
         domain_spec_path = os.path.join(path, "metadata.json")
-        rasa.utils.io.create_directory_for_file(domain_spec_path)
+        rasa.shared.utils.io.create_directory_for_file(domain_spec_path)
 
-        policy_names = [utils.module_path_from_instance(p) for p in self.policies]
+        policy_names = [
+            rasa.shared.utils.common.module_path_from_instance(p) for p in self.policies
+        ]
 
         metadata = {
             "action_fingerprints": self.action_fingerprints,
@@ -193,22 +250,24 @@ class PolicyEnsemble:
 
         self._add_package_version_info(metadata)
 
-        rasa.utils.io.dump_obj_as_json_to_file(domain_spec_path, metadata)
+        rasa.shared.utils.io.dump_obj_as_json_to_file(domain_spec_path, metadata)
 
-    def persist(self, path: Text) -> None:
+    def persist(self, path: Union[Text, Path]) -> None:
         """Persists the policy to storage."""
 
         self._persist_metadata(path)
 
         for i, policy in enumerate(self.policies):
             dir_name = "policy_{}_{}".format(i, type(policy).__name__)
-            policy_path = os.path.join(path, dir_name)
+            policy_path = Path(path) / dir_name
             policy.persist(policy_path)
 
     @classmethod
     def load_metadata(cls, path) -> Any:
         metadata_path = os.path.join(path, "metadata.json")
-        metadata = json.loads(rasa.utils.io.read_file(os.path.abspath(metadata_path)))
+        metadata = json.loads(
+            rasa.shared.utils.io.read_file(os.path.abspath(metadata_path))
+        )
         return metadata
 
     @staticmethod
@@ -243,7 +302,7 @@ class PolicyEnsemble:
             )
 
     @classmethod
-    def load(cls, path: Text) -> "PolicyEnsemble":
+    def load(cls, path: Union[Text, Path]) -> "PolicyEnsemble":
         """Loads policy and domain specification from storage"""
 
         metadata = cls.load_metadata(path)
@@ -256,7 +315,9 @@ class PolicyEnsemble:
             policy = policy_cls.load(policy_path)
             cls._ensure_loaded_policy(policy, policy_cls, policy_name)
             policies.append(policy)
-        ensemble_cls = class_from_module_path(metadata["ensemble_name"])
+        ensemble_cls = rasa.shared.utils.common.class_from_module_path(
+            metadata["ensemble_name"]
+        )
         fingerprints = metadata.get("action_fingerprints", {})
         ensemble = ensemble_cls(policies, fingerprints)
         return ensemble
@@ -283,7 +344,6 @@ class PolicyEnsemble:
         parsed_policies = []
 
         for policy in policies:
-            policy_name = policy.pop("name")
             if policy.get("featurizer"):
                 featurizer_func, featurizer_config = cls.get_featurizer_from_dict(
                     policy
@@ -304,6 +364,7 @@ class PolicyEnsemble:
                 # override policy's featurizer with real featurizer class
                 policy["featurizer"] = featurizer_func(**featurizer_config)
 
+            policy_name = policy.pop("name")
             try:
                 constr_func = registry.policy_from_module_path(policy_name)
                 try:
@@ -313,11 +374,12 @@ class PolicyEnsemble:
                 parsed_policies.append(policy_object)
             except (ImportError, AttributeError):
                 raise InvalidPolicyConfig(
-                    "Module for policy '{}' could not "
-                    "be loaded. Please make sure the "
-                    "name is a valid policy."
-                    "".format(policy_name)
+                    f"Module for policy '{policy_name}' could not "
+                    f"be loaded. Please make sure the "
+                    f"name is a valid policy."
                 )
+
+        cls._check_if_rule_policy_used_with_rule_like_policies(parsed_policies)
 
         return parsed_policies
 
@@ -325,7 +387,11 @@ class PolicyEnsemble:
     def get_featurizer_from_dict(cls, policy) -> Tuple[Any, Any]:
         # policy can have only 1 featurizer
         if len(policy["featurizer"]) > 1:
-            raise InvalidPolicyConfig("policy can have only 1 featurizer")
+            raise InvalidPolicyConfig(
+                f"Every policy can only have 1 featurizer "
+                f"but '{policy.get('name')}' "
+                f"uses {len(policy['featurizer'])} featurizers."
+            )
         featurizer_config = policy["featurizer"][0]
         featurizer_name = featurizer_config.pop("name")
         featurizer_func = registry.featurizer_from_module_path(featurizer_name)
@@ -336,14 +402,51 @@ class PolicyEnsemble:
     def get_state_featurizer_from_dict(cls, featurizer_config) -> Tuple[Any, Any]:
         # featurizer can have only 1 state featurizer
         if len(featurizer_config["state_featurizer"]) > 1:
-            raise InvalidPolicyConfig("featurizer can have only 1 state featurizer")
+            raise InvalidPolicyConfig(
+                f"Every featurizer can only have 1 state "
+                f"featurizer but one of the featurizers uses "
+                f"{len(featurizer_config['state_featurizer'])}."
+            )
         state_featurizer_config = featurizer_config["state_featurizer"][0]
         state_featurizer_name = state_featurizer_config.pop("name")
-        state_featurizer_func = registry.featurizer_from_module_path(
+        state_featurizer_func = registry.state_featurizer_from_module_path(
             state_featurizer_name
         )
 
         return state_featurizer_func, state_featurizer_config
+
+    @staticmethod
+    def _check_if_rule_policy_used_with_rule_like_policies(
+        policies: List[Policy],
+    ) -> None:
+        if not any(isinstance(policy, RulePolicy) for policy in policies):
+            return
+
+        from rasa.core.policies.mapping_policy import MappingPolicy
+        from rasa.core.policies.form_policy import FormPolicy
+        from rasa.core.policies.two_stage_fallback import TwoStageFallbackPolicy
+
+        policies_not_be_used_with_rule_policy = (
+            MappingPolicy,
+            FormPolicy,
+            FallbackPolicy,
+            TwoStageFallbackPolicy,
+        )
+
+        if any(
+            isinstance(policy, policies_not_be_used_with_rule_policy)
+            for policy in policies
+        ):
+            rasa.shared.utils.io.raise_warning(
+                f"It is not recommended to use the '{RulePolicy.__name__}' with "
+                f"other policies which implement rule-like "
+                f"behavior. It is highly recommended to migrate all deprecated "
+                f"policies to use the '{RulePolicy.__name__}'. Note that the "
+                f"'{RulePolicy.__name__}' will supersede the predictions of the "
+                f"deprecated policies if the confidence levels of the predictions are "
+                f"equal.",
+                docs=DOCS_URL_MIGRATION_GUIDE,
+            )
 
 
 class Prediction(NamedTuple):
@@ -381,7 +484,7 @@ class SimplePolicyEnsemble(PolicyEnsemble):
 
     def _pick_best_policy(
         self, predictions: Dict[Text, Prediction]
-    ) -> Tuple[Optional[List[float]], Optional[Text]]:
+    ) -> Tuple[List[float], Optional[Text]]:
         """Picks the best policy prediction based on probabilities and policy priority.
 
         Args:
@@ -426,30 +529,43 @@ class SimplePolicyEnsemble(PolicyEnsemble):
         return predictions[best_policy_name].probabilities, best_policy_name
 
     def _best_policy_prediction(
-        self, tracker: DialogueStateTracker, domain: Domain
-    ) -> Tuple[Optional[List[float]], Optional[Text]]:
+        self,
+        tracker: DialogueStateTracker,
+        domain: Domain,
+        interpreter: NaturalLanguageInterpreter,
+    ) -> Tuple[List[float], Optional[Text]]:
         """Finds the best policy prediction.
 
         Args:
             tracker: the :class:`rasa.core.trackers.DialogueStateTracker`
-            domain: the :class:`rasa.core.domain.Domain`
+            domain: the :class:`rasa.shared.core.domain.Domain`
+            interpreter: Interpreter which may be used by the policies to create
+                additional features.
 
         Returns:
             probabilities: the list of probabilities for the next actions
             policy_name: the name of the picked policy
         """
-
         # find rejected action before running the policies
         # because some of them might add events
         rejected_action_name = None
+        last_action_event = next(
+            (
+                event
+                for event in reversed(tracker.events)
+                if isinstance(event, (ActionExecutionRejected, ActionExecuted))
+            ),
+            None,
+        )
+
         if len(tracker.events) > 0 and isinstance(
-            tracker.events[-1], ActionExecutionRejected
+            last_action_event, ActionExecutionRejected
         ):
-            rejected_action_name = tracker.events[-1].action_name
+            rejected_action_name = last_action_event.action_name
 
         predictions = {
-            f"policy_{i}_{type(p).__name__}": Prediction(
-                p.predict_action_probabilities(tracker, domain), p.priority,
+            f"policy_{i}_{type(p).__name__}": self._get_prediction(
+                p, tracker, domain, interpreter
             )
             for i, p in enumerate(self.policies)
         }
@@ -466,6 +582,38 @@ class SimplePolicyEnsemble(PolicyEnsemble):
 
         return self._pick_best_policy(predictions)
 
+    @staticmethod
+    def _get_prediction(
+        policy: Policy,
+        tracker: DialogueStateTracker,
+        domain: Domain,
+        interpreter: NaturalLanguageInterpreter,
+    ) -> Prediction:
+        number_of_arguments_in_rasa_1_0 = 2
+        arguments = rasa.shared.utils.common.arguments_of(
+            policy.predict_action_probabilities
+        )
+        if (
+            len(arguments) > number_of_arguments_in_rasa_1_0
+            and "interpreter" in arguments
+        ):
+            probabilities = policy.predict_action_probabilities(
+                tracker, domain, interpreter
+            )
+        else:
+            rasa.shared.utils.io.raise_warning(
+                "The function `predict_action_probabilities` of "
+                "the `Policy` interface was changed to support "
+                "additional parameters. Please make sure to "
+                "adapt your custom `Policy` implementation.",
+                category=DeprecationWarning,
+            )
+            probabilities = policy.predict_action_probabilities(
+                tracker, domain, RegexInterpreter()
+            )
+
+        return Prediction(probabilities, policy.priority)
+
     def _fallback_after_listen(
         self, domain: Domain, probabilities: List[float], policy_name: Text
     ) -> Tuple[List[float], Text]:
@@ -478,7 +626,7 @@ class SimplePolicyEnsemble(PolicyEnsemble):
           other than the MemoizationPolicy
 
         Args:
-            domain: the :class:`rasa.core.domain.Domain`
+            domain: the :class:`rasa.shared.core.domain.Domain`
             probabilities: the list of probabilities for the next actions
             policy_name: the name of the picked policy
 
@@ -506,8 +654,12 @@ class SimplePolicyEnsemble(PolicyEnsemble):
         return probabilities, policy_name
 
     def probabilities_using_best_policy(
-        self, tracker: DialogueStateTracker, domain: Domain
-    ) -> Tuple[Optional[List[float]], Optional[Text]]:
+        self,
+        tracker: DialogueStateTracker,
+        domain: Domain,
+        interpreter: NaturalLanguageInterpreter,
+        **kwargs: Any,
+    ) -> Tuple[List[float], Optional[Text]]:
         """Predicts the next action the bot should take after seeing the tracker.
 
         Picks the best policy prediction based on probabilities and policy priority.
@@ -515,14 +667,18 @@ class SimplePolicyEnsemble(PolicyEnsemble):
 
         Args:
             tracker: the :class:`rasa.core.trackers.DialogueStateTracker`
-            domain: the :class:`rasa.core.domain.Domain`
+            domain: the :class:`rasa.shared.core.domain.Domain`
+            interpreter: Interpreter which may be used by the policies to create
+                additional features.
 
         Returns:
             best_probabilities: the list of probabilities for the next actions
             best_policy_name: the name of the picked policy
         """
 
-        probabilities, policy_name = self._best_policy_prediction(tracker, domain)
+        probabilities, policy_name = self._best_policy_prediction(
+            tracker, domain, interpreter
+        )
 
         if (
             tracker.latest_action_name == ACTION_LISTEN_NAME
@@ -539,7 +695,30 @@ class SimplePolicyEnsemble(PolicyEnsemble):
         return probabilities, policy_name
 
 
-class InvalidPolicyConfig(Exception):
+def _check_policy_for_forms_available(
+    domain: Domain, ensemble: Optional["PolicyEnsemble"]
+) -> None:
+    if not ensemble:
+        return
+
+    from rasa.core.policies.form_policy import FormPolicy
+
+    suited_policies_for_forms = (FormPolicy, RulePolicy)
+
+    has_policy_for_forms = ensemble is not None and any(
+        isinstance(policy, suited_policies_for_forms) for policy in ensemble.policies
+    )
+
+    if domain.form_names and not has_policy_for_forms:
+        raise InvalidDomain(
+            "You have defined a form action, but haven't added the "
+            "FormPolicy to your policy ensemble. Either remove all "
+            "forms from your domain or exclude the FormPolicy from your "
+            "policy configuration."
+        )
+
+
+class InvalidPolicyConfig(RasaException):
     """Exception that can be raised when policy config is not valid."""
 
     pass

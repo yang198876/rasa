@@ -1,23 +1,34 @@
 import numpy as np
 import pytest
+from typing import Text
+from _pytest.monkeypatch import MonkeyPatch
 
-from rasa.nlu.tokenizers.convert_tokenizer import ConveRTTokenizer
-from rasa.nlu.tokenizers.tokenizer import Tokenizer
-from rasa.nlu.training_data import TrainingData
-from rasa.nlu.constants import TEXT, TOKENS_NAMES, RESPONSE, INTENT
-from rasa.nlu.training_data import Message
+from rasa.nlu.tokenizers.convert_tokenizer import (
+    ConveRTTokenizer,
+    RESTRICTED_ACCESS_URL,
+)
+from rasa.shared.nlu.training_data.training_data import TrainingData
+from rasa.shared.nlu.training_data.message import Message
+from rasa.nlu.constants import TOKENS_NAMES
+from rasa.shared.nlu.constants import TEXT, INTENT, RESPONSE
 from rasa.nlu.config import RasaNLUModelConfig
 from rasa.nlu.featurizers.dense_featurizer.convert_featurizer import ConveRTFeaturizer
 
 
-def test_convert_featurizer_process(component_builder):
-    tokenizer = component_builder.create_component_from_class(ConveRTTokenizer)
+@pytest.mark.skip_on_windows
+def test_convert_featurizer_process(component_builder, monkeypatch: MonkeyPatch):
+
+    monkeypatch.setattr(
+        ConveRTTokenizer, "_get_validated_model_url", lambda x: RESTRICTED_ACCESS_URL
+    )
+
+    component_config = {"name": "ConveRTTokenizer", "model_url": RESTRICTED_ACCESS_URL}
+    tokenizer = ConveRTTokenizer(component_config)
     featurizer = component_builder.create_component_from_class(ConveRTFeaturizer)
 
     sentence = "Hey how are you today ?"
-    message = Message(sentence)
+    message = Message(data={TEXT: sentence})
     tokens = tokenizer.tokenize(message, attribute=TEXT)
-    tokens = tokenizer.add_cls_token(tokens, attribute=TEXT)
     message.set(TOKENS_NAMES[TEXT], tokens)
 
     featurizer.process(message, tf_hub_module=tokenizer.module)
@@ -27,22 +38,32 @@ def test_convert_featurizer_process(component_builder):
         [1.0251294, -0.04053932, -0.7018805, -0.82054937, -0.75054353]
     )
 
-    vecs = message.get_dense_features(TEXT, [])
+    seq_vecs, sent_vecs = message.get_dense_features(TEXT, [])
 
-    assert len(tokens) == len(vecs)
-    assert np.allclose(vecs[0][:5], expected, atol=1e-5)
-    assert np.allclose(vecs[-1][:5], expected_cls, atol=1e-5)
+    seq_vecs = seq_vecs.features
+    sent_vecs = sent_vecs.features
+
+    assert len(tokens) == len(seq_vecs)
+    assert np.allclose(seq_vecs[0][:5], expected, atol=1e-5)
+    assert np.allclose(sent_vecs[-1][:5], expected_cls, atol=1e-5)
 
 
-def test_convert_featurizer_train(component_builder):
-    tokenizer = component_builder.create_component_from_class(ConveRTTokenizer)
+@pytest.mark.skip_on_windows
+def test_convert_featurizer_train(component_builder, monkeypatch: MonkeyPatch):
+
+    monkeypatch.setattr(
+        ConveRTTokenizer, "_get_validated_model_url", lambda x: RESTRICTED_ACCESS_URL
+    )
+    component_config = {"name": "ConveRTTokenizer", "model_url": RESTRICTED_ACCESS_URL}
+    tokenizer = ConveRTTokenizer(component_config)
     featurizer = component_builder.create_component_from_class(ConveRTFeaturizer)
 
     sentence = "Hey how are you today ?"
-    message = Message(sentence)
+    message = Message(data={TEXT: sentence})
     message.set(RESPONSE, sentence)
+
     tokens = tokenizer.tokenize(message, attribute=TEXT)
-    tokens = tokenizer.add_cls_token(tokens, attribute=TEXT)
+
     message.set(TOKENS_NAMES[TEXT], tokens)
     message.set(TOKENS_NAMES[RESPONSE], tokens)
 
@@ -55,23 +76,31 @@ def test_convert_featurizer_train(component_builder):
         [1.0251294, -0.04053932, -0.7018805, -0.82054937, -0.75054353]
     )
 
-    vecs = message.get_dense_features(TEXT, [])
+    seq_vecs, sent_vecs = message.get_dense_features(TEXT, [])
 
-    assert len(tokens) == len(vecs)
-    assert np.allclose(vecs[0][:5], expected, atol=1e-5)
-    assert np.allclose(vecs[-1][:5], expected_cls, atol=1e-5)
+    seq_vecs = seq_vecs.features
+    sent_vecs = sent_vecs.features
 
-    vecs = message.get_dense_features(RESPONSE, [])
+    assert len(tokens) == len(seq_vecs)
+    assert np.allclose(seq_vecs[0][:5], expected, atol=1e-5)
+    assert np.allclose(sent_vecs[-1][:5], expected_cls, atol=1e-5)
 
-    assert len(tokens) == len(vecs)
-    assert np.allclose(vecs[0][:5], expected, atol=1e-5)
-    assert np.allclose(vecs[-1][:5], expected_cls, atol=1e-5)
+    seq_vecs, sent_vecs = message.get_dense_features(RESPONSE, [])
 
-    vecs = message.get_dense_features(INTENT, [])
+    seq_vecs = seq_vecs.features
+    sent_vecs = sent_vecs.features
 
-    assert vecs is None
+    assert len(tokens) == len(seq_vecs)
+    assert np.allclose(seq_vecs[0][:5], expected, atol=1e-5)
+    assert np.allclose(sent_vecs[-1][:5], expected_cls, atol=1e-5)
+
+    seq_vecs, sent_vecs = message.get_dense_features(INTENT, [])
+
+    assert seq_vecs is None
+    assert sent_vecs is None
 
 
+@pytest.mark.skip_on_windows
 @pytest.mark.parametrize(
     "sentence, expected_text",
     [
@@ -82,9 +111,16 @@ def test_convert_featurizer_train(component_builder):
         ("ńöñàśçií", "ńöñàśçií"),
     ],
 )
-def test_convert_featurizer_tokens_to_text(component_builder, sentence, expected_text):
-    tokenizer = component_builder.create_component_from_class(ConveRTTokenizer)
-    tokens = tokenizer.tokenize(Message(sentence), attribute=TEXT)
+def test_convert_featurizer_tokens_to_text(
+    sentence: Text, expected_text: Text, monkeypatch: MonkeyPatch
+):
+
+    monkeypatch.setattr(
+        ConveRTTokenizer, "_get_validated_model_url", lambda x: RESTRICTED_ACCESS_URL
+    )
+    component_config = {"name": "ConveRTTokenizer", "model_url": RESTRICTED_ACCESS_URL}
+    tokenizer = ConveRTTokenizer(component_config)
+    tokens = tokenizer.tokenize(Message(data={TEXT: sentence}), attribute=TEXT)
 
     actual_text = ConveRTFeaturizer._tokens_to_text([tokens])[0]
 

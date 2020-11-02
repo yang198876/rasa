@@ -13,7 +13,7 @@ class Object:
 
 
 # noinspection PyPep8Naming
-async def test_list_method_method_in_AWS_persistor(component_builder, tmpdir):
+async def test_list_method_method_in_AWS_persistor(component_builder, tmp_path):
     with mock_s3():
         # artificially create a persisted model
         _config = RasaNLUModelConfig(
@@ -26,7 +26,7 @@ async def test_list_method_method_in_AWS_persistor(component_builder, tmpdir):
         (trained, _, persisted_path) = await train(
             _config,
             data="data/test/demo-rasa-small.json",
-            path=tmpdir.strpath,
+            path=str(tmp_path),
             storage="aws",
             component_builder=component_builder,
         )
@@ -128,16 +128,21 @@ def test_list_models_method_in_Azure_persistor():
         self._model_dir_and_model_from_filename = lambda x: {
             "blob_name": ("project", "model_name")
         }[x]
-        self.blob_client = Object()
+        self.blob_service = Object()
         self.container_name = "test"
 
         # noinspection PyUnusedLocal
-        def mocked_list_blobs(container_name, prefix=None):
-            filter_result = Object()
-            filter_result.name = "blob_name"
-            return (filter_result,)
+        def mocked_container_client():
+            def list_blobs():
+                filter_result = Object()
+                filter_result.name = "blob_name"
+                return (filter_result,)
 
-        self.blob_client.list_blobs = mocked_list_blobs
+            container_client = Object()
+            container_client.list_blobs = list_blobs
+            return container_client
+
+        self._container_client = mocked_container_client
 
     with patch.object(persistor.AzurePersistor, "__init__", mocked_init):
         result = persistor.AzurePersistor("", "", "").list_models()
@@ -163,6 +168,16 @@ def test_list_models_method_raise_exeception_in_Azure_persistor():
         result = persistor.AzurePersistor("", "", "").list_models()
 
     assert result == []
+
+
+def test_get_external_persistor():
+    p = persistor.get_persistor("rasa.nlu.persistor.Persistor")
+    assert isinstance(p, persistor.Persistor)
+
+
+def test_raise_exception_in_get_external_persistor():
+    with pytest.raises(ImportError):
+        _ = persistor.get_persistor("unknown.persistor")
 
 
 # noinspection PyPep8Naming

@@ -1,5 +1,4 @@
 import logging
-import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -11,6 +10,7 @@ from _pytest.capture import CaptureFixture
 from _pytest.logging import LogCaptureFixture
 from _pytest.monkeypatch import MonkeyPatch
 from moto import mock_dynamodb2
+from rasa.shared.constants import DEFAULT_SENDER_ID
 from sqlalchemy.dialects.postgresql.base import PGDialect
 from sqlalchemy.dialects.sqlite.base import SQLiteDialect
 from sqlalchemy.dialects.oracle.base import OracleDialect
@@ -19,11 +19,10 @@ from typing import Tuple, Text, Type, Dict, List, Union, Optional, ContextManage
 from unittest.mock import Mock
 
 import rasa.core.tracker_store
-from rasa.core.actions.action import ACTION_LISTEN_NAME, ACTION_SESSION_START_NAME
-from rasa.core.channels.channel import UserMessage
+from rasa.shared.core.constants import ACTION_LISTEN_NAME, ACTION_SESSION_START_NAME
 from rasa.core.constants import POSTGRESQL_SCHEMA
-from rasa.core.domain import Domain
-from rasa.core.events import (
+from rasa.shared.core.domain import Domain
+from rasa.shared.core.events import (
     SlotSet,
     ActionExecuted,
     Restarted,
@@ -40,7 +39,7 @@ from rasa.core.tracker_store import (
     DynamoTrackerStore,
     FailSafeTrackerStore,
 )
-from rasa.core.trackers import DialogueStateTracker
+from rasa.shared.core.trackers import DialogueStateTracker
 from rasa.utils.endpoints import EndpointConfig, read_endpoint_config
 from tests.core.conftest import DEFAULT_ENDPOINTS_FILE, MockedMongoTrackerStore
 
@@ -51,14 +50,14 @@ def get_or_create_tracker_store(store: TrackerStore) -> None:
     slot_key = "location"
     slot_val = "Easter Island"
 
-    tracker = store.get_or_create_tracker(UserMessage.DEFAULT_SENDER_ID)
+    tracker = store.get_or_create_tracker(DEFAULT_SENDER_ID)
     ev = SlotSet(slot_key, slot_val)
     tracker.update(ev)
     assert tracker.get_slot(slot_key) == slot_val
 
     store.save(tracker)
 
-    again = store.get_or_create_tracker(UserMessage.DEFAULT_SENDER_ID)
+    again = store.get_or_create_tracker(DEFAULT_SENDER_ID)
     assert again.get_slot(slot_key) == slot_val
 
 
@@ -238,7 +237,7 @@ def _tracker_store_and_tracker_with_slot_set() -> Tuple[
     slot_val = "French"
 
     store = InMemoryTrackerStore(domain)
-    tracker = store.get_or_create_tracker(UserMessage.DEFAULT_SENDER_ID)
+    tracker = store.get_or_create_tracker(DEFAULT_SENDER_ID)
     ev = SlotSet(slot_key, slot_val)
     tracker.update(ev)
 
@@ -249,12 +248,10 @@ def test_tracker_serialisation():
     store, tracker = _tracker_store_and_tracker_with_slot_set()
     serialised = store.serialise_tracker(tracker)
 
-    assert tracker == store.deserialise_tracker(
-        UserMessage.DEFAULT_SENDER_ID, serialised
-    )
+    assert tracker == store.deserialise_tracker(DEFAULT_SENDER_ID, serialised)
 
 
-def test_deprecated_pickle_deserialisation(caplog: LogCaptureFixture):
+def test_deprecated_pickle_deserialisation():
     def pickle_serialise_tracker(_tracker):
         # mocked version of TrackerStore.serialise_tracker() that uses
         # the deprecated pickle serialisation
@@ -270,13 +267,12 @@ def test_deprecated_pickle_deserialisation(caplog: LogCaptureFixture):
 
     # deprecation warning should be emitted
 
-    caplog.clear()  # avoid counting debug messages
-    with caplog.at_level(logging.WARNING):
-        assert tracker == store.deserialise_tracker(
-            UserMessage.DEFAULT_SENDER_ID, serialised
-        )
-    assert len(caplog.records) == 1
-    assert "Deserialisation of pickled trackers will be deprecated" in caplog.text
+    with pytest.warns(FutureWarning) as record:
+        assert tracker == store.deserialise_tracker(DEFAULT_SENDER_ID, serialised)
+    assert len(record) == 1
+    assert (
+        "Deserialization of pickled trackers is deprecated" in record[0].message.args[0]
+    )
 
 
 @pytest.mark.parametrize(
@@ -571,10 +567,10 @@ def test_tracker_store_retrieve_with_session_started_events(
 ):
     tracker_store = tracker_store_type(default_domain, **tracker_store_kwargs)
     events = [
-        UserUttered("Hola", {"name": "greet"}),
-        BotUttered("Hi"),
-        SessionStarted(),
-        UserUttered("Ciao", {"name": "greet"}),
+        UserUttered("Hola", {"name": "greet"}, timestamp=1),
+        BotUttered("Hi", timestamp=2),
+        SessionStarted(timestamp=3),
+        UserUttered("Ciao", {"name": "greet"}, timestamp=4),
     ]
     sender_id = "test_sql_tracker_store_with_session_events"
     tracker = DialogueStateTracker.from_events(sender_id, events)
@@ -636,7 +632,6 @@ def test_tracker_store_retrieve_with_events_from_previous_sessions(
     tracker_store_type: Type[TrackerStore], tracker_store_kwargs: Dict
 ):
     tracker_store = tracker_store_type(Domain.empty(), **tracker_store_kwargs)
-    tracker_store.load_events_from_previous_conversation_sessions = True
 
     conversation_id = uuid.uuid4().hex
     tracker = DialogueStateTracker.from_events(
@@ -651,9 +646,34 @@ def test_tracker_store_retrieve_with_events_from_previous_sessions(
     )
     tracker_store.save(tracker)
 
-    actual = tracker_store.retrieve(conversation_id)
+    actual = tracker_store.retrieve_full_tracker(conversation_id)
 
     assert len(actual.events) == len(tracker.events)
+
+
+def test_tracker_store_deprecated_session_retrieval_kwarg():
+    tracker_store = SQLTrackerStore(
+        Domain.empty(), retrieve_events_from_previous_conversation_sessions=True
+    )
+
+    conversation_id = uuid.uuid4().hex
+    tracker = DialogueStateTracker.from_events(
+        conversation_id,
+        [
+            ActionExecuted(ACTION_SESSION_START_NAME),
+            SessionStarted(),
+            UserUttered("hi"),
+        ],
+    )
+
+    mocked_retrieve_full_tracker = Mock()
+    tracker_store.retrieve_full_tracker = mocked_retrieve_full_tracker
+
+    tracker_store.save(tracker)
+
+    _ = tracker_store.retrieve(conversation_id)
+
+    mocked_retrieve_full_tracker.assert_called_once()
 
 
 def test_session_scope_error(
